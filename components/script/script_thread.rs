@@ -42,7 +42,7 @@ use dom::element::Element;
 use dom::event::{Event, EventBubbles, EventCancelable};
 use dom::htmlanchorelement::HTMLAnchorElement;
 use dom::node::{Node, NodeDamage, window_from_node};
-use dom::serviceworker::TrustedServiceWorkerAddress;
+use dom::serviceworker::{TrustedServiceWorkerAddress, ServiceWorker};
 use dom::serviceworkerregistration::ServiceWorkerRegistration;
 use dom::servohtmlparser::ParserContext;
 use dom::uievent::UIEvent;
@@ -930,6 +930,8 @@ impl ScriptThread {
                 self.handle_css_error_reporting(pipeline_id, filename, line, column, msg),
             ConstellationControlMsg::Reload(pipeline_id) =>
                 self.handle_reload(pipeline_id),
+            ConstellationControlMsg::NotifyServiceWorker(scope_url) =>
+                self.notify_serviceworker(scope_url),
             msg @ ConstellationControlMsg::AttachLayout(..) |
             msg @ ConstellationControlMsg::Viewport(..) |
             msg @ ConstellationControlMsg::SetScrollState(..) |
@@ -1450,7 +1452,16 @@ impl ScriptThread {
             let scope_things = ServiceWorkerRegistration::create_scope_things(global_ref, script_url);
             let _ = self.constellation_chan.send(ConstellationMsg::RegisterServiceWorker(scope_things, scope));
         } else {
-            warn!("Registration failed for {}", pipeline_id);
+            warn!("Registration failed for {}", scope);
+        }
+    }
+
+    // Send the service worker object a fetch notification at the given scope url
+    fn notify_serviceworker(&self, scope_url: Url) {
+        let ref maybe_registration_ref = *self.registration_map.borrow();
+        if let Some(ref registration) = maybe_registration_ref.get(&scope_url) {
+            let trusted_worker = registration.get_trusted_worker();
+            ServiceWorker::handle_fetch(trusted_worker);
         }
     }
 
@@ -2173,6 +2184,7 @@ impl ScriptThread {
             location.Reload();
         }
     }
+
 }
 
 impl Drop for ScriptThread {

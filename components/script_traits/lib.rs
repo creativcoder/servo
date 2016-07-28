@@ -206,6 +206,8 @@ pub enum ConstellationControlMsg {
     ReportCSSError(PipelineId, String, usize, usize, String),
     /// Reload the given page.
     Reload(PipelineId),
+    /// Requests the script thread to send events to service worker object
+    NotifyServiceWorker(Url)
 }
 
 impl fmt::Debug for ConstellationControlMsg {
@@ -235,6 +237,7 @@ impl fmt::Debug for ConstellationControlMsg {
             FramedContentChanged(..) => "FramedContentChanged",
             ReportCSSError(..) => "ReportCSSError",
             Reload(..) => "Reload",
+            NotifyServiceWorker(..) => "NotifyServiceWorker"
         })
     }
 }

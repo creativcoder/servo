@@ -85,6 +85,11 @@ impl ServiceWorker {
                            script_url.as_str(),
                            skip_waiting)
     }
+
+    pub fn handle_fetch(trusted_worker: TrustedServiceWorkerAddress) {
+        let worker = trusted_worker.root();
+        worker.upcast::<EventTarget>().fire_simple_event("fetch");
+    }
 }
 
 impl ServiceWorkerMethods for ServiceWorker {

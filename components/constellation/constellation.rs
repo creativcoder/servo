@@ -721,6 +721,12 @@ impl<Message, LTF, STF> Constellation<Message, LTF, STF>
                 // store service worker manager for communicating with it.
                 self.swmanager_chan = Some(sw_sender);
             }
+            SWManagerMsg::NetworkFetch(scope_url, pipeline_id) => {
+                if let Some(ref parent_info) = self.pipelines.get(&pipeline_id) {
+                    let from_cons_msg = ConstellationControlMsg::NotifyServiceWorker(scope_url);
+                    let _ = parent_info.script_chan.send(from_cons_msg);
+                }
+            }
         }
     }
 

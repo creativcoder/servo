@@ -184,4 +184,7 @@ pub enum ServiceWorkerMsg {
 pub enum SWManagerMsg {
     /// Provide the constellation with a means of communicating with the Service Worker Manager
     OwnSender(IpcSender<ServiceWorkerMsg>),
+    /// Message to ask to get a Trusted<ServiceWorker> to constellation
+    NetworkFetch(Url, PipelineId)
+
 }
