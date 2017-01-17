@@ -167,6 +167,9 @@ pub enum FetchResponseMsg {
     ProcessResponseEOF(Result<(), NetworkError>),
 }
 
+// TODO rename it to a better name
+// like `FetchResponseHandler`
+// TaskTarget seems a confusing term for this
 pub trait FetchTaskTarget {
     /// https://fetch.spec.whatwg.org/#process-request-body
     ///
@@ -371,6 +374,7 @@ pub struct WebSocketConnectData {
 
 #[derive(Deserialize, Serialize)]
 pub enum CoreResourceMsg {
+    /// Initiate a fetch request
     Fetch(RequestInit, IpcSender<FetchResponseMsg>),
     /// Try to make a websocket connection to a URL.
     WebsocketConnect(WebSocketCommunicate, WebSocketConnectData),

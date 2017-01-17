@@ -40,7 +40,7 @@ fn from_referrer_to_referrer_url(request: &NetTraitsRequest) -> Option<ServoUrl>
     referrer.to_url().map(|url| url.clone())
 }
 
-fn request_init_from_request(request: NetTraitsRequest) -> NetTraitsRequestInit {
+pub fn request_init_from_request(request: NetTraitsRequest) -> NetTraitsRequestInit {
     NetTraitsRequestInit {
         method: request.method.borrow().clone(),
         url: request.url(),

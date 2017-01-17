@@ -14,7 +14,10 @@ use dom::workerglobalscope::prepare_workerscope_init;
 use script_traits::{WorkerScriptLoadOrigin, ScopeThings};
 use servo_url::ServoUrl;
 use std::cell::Cell;
+use std::time::Instant;
 
+// i.e.,which means do not use cache if the last update time is greater than 1 day.
+const UPDATE_SPAN: u64 = 864000;
 
 #[dom_struct]
 pub struct ServiceWorkerRegistration {
@@ -23,7 +26,10 @@ pub struct ServiceWorkerRegistration {
     installing: Option<JS<ServiceWorker>>,
     waiting: Option<JS<ServiceWorker>>,
     scope: ServoUrl,
-    uninstalling: Cell<bool>
+    uninstalling: Cell<bool>,
+    use_cache: bool,
+    #[ignore_heap_size_of = "Defined in std"]
+    last_updated: Cell<Option<Instant>>
 }
 
 impl ServiceWorkerRegistration {
@@ -34,7 +40,9 @@ impl ServiceWorkerRegistration {
             installing: None,
             waiting: None,
             scope: scope,
-            uninstalling: Cell::new(false)
+            uninstalling: Cell::new(false),
+            use_cache: false,
+            last_updated: Cell::new(None)
         }
     }
     #[allow(unrooted_must_root)]
@@ -56,6 +64,15 @@ impl ServiceWorkerRegistration {
 
     pub fn set_uninstalling(&self, flag: bool) {
         self.uninstalling.set(flag)
+    }
+
+    pub fn should_use_cache(&self) -> bool {
+        self.use_cache
+    }
+
+    // Its an `Option` to handle the case when last_update time is null
+    pub fn update_time_check(&self) -> Option<bool> {
+        self.last_updated.get().map(|t| Instant::now().duration_since(t).as_secs() > UPDATE_SPAN)
     }
 
     pub fn create_scope_things(global: &GlobalScope, script_url: ServoUrl) -> ScopeThings {

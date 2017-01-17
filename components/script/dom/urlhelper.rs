@@ -92,6 +92,7 @@ impl UrlHelper {
     // https://w3c.github.io/webappsec-secure-contexts/#is-origin-trustworthy
     pub fn is_origin_trustworthy(url: &ServoUrl) -> bool {
         // Step 3
+        // TODO(creativcoder) should be https
         if url.scheme() == "http" || url.scheme() == "wss" {
             true
         // Step 4

@@ -7,7 +7,7 @@ use hyper::header::Headers;
 use hyper::method::Method;
 use msg::constellation_msg::PipelineId;
 use servo_url::ServoUrl;
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, RefCell, RefMut};
 use std::default::Default;
 use url::Origin as UrlOrigin;
 
@@ -298,6 +298,17 @@ impl Request {
         req
     }
 
+    // https://html.spec.whatwg.org/multipage/webappapis.html#fetch-a-classic-worker-script (Step 1)
+    pub fn get_classic_fetch_req(url: ServoUrl, pipeline_id: PipelineId) -> Request {
+        let mut req = Request::new(url, Some(Origin::Client), false, Some(pipeline_id));
+        req.type_ = Type::Script;
+        req.destination = Destination::ServiceWorker;
+        req.mode = RequestMode::SameOrigin;
+        req.credentials_mode = CredentialsMode::CredentialsSameOrigin;
+        req.use_url_credentials = false;
+        req
+    }
+
     pub fn url(&self) -> ServoUrl {
         self.url_list.borrow().first().unwrap().clone()
     }
@@ -308,6 +319,10 @@ impl Request {
 
     pub fn is_navigation_request(&self) -> bool {
         self.destination == Destination::Document
+    }
+
+    pub fn headers_mut(&self) -> RefMut<Headers> {
+        self.headers.borrow_mut()
     }
 
     pub fn is_subresource_request(&self) -> bool {

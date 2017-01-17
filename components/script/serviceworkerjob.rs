@@ -17,11 +17,28 @@ use dom::globalscope::GlobalScope;
 use dom::promise::Promise;
 use dom::serviceworkerregistration::ServiceWorkerRegistration;
 use dom::urlhelper::UrlHelper;
+use dom::response::Response;
+use hyper::header::ContentType;
+use mime::{Mime, TopLevel, SubLevel};
+use net_traits::response::HttpsState;
+use net_traits::request::{Request, CacheMode, RedirectMode};
 use script_thread::{ScriptThread, Runnable};
+use script_runtime::{CommonScriptMsg, ScriptThreadEventCategory};
 use servo_url::ServoUrl;
 use std::cmp::PartialEq;
 use std::collections::HashMap;
 use std::rc::Rc;
+use msg::constellation_msg::PipelineId;
+use network_listener::{NetworkListener, PreInvoke};
+use dom::bindings::refcounted::TrustedPromise;
+use net_traits::{FilteredMetadata, FetchMetadata, Metadata};
+use net_traits::{FetchResponseListener, NetworkError};
+use ipc_channel::ipc;
+use ipc_channel::router::ROUTER;
+use std::sync::{Arc, Mutex};
+use url::Url;
+use net_traits::CoreResourceMsg::Fetch as WorkerScriptFetchMsg;
+use fetch::request_init_from_request;
 
 #[derive(PartialEq, Clone, Debug, JSTraceable)]
 pub enum JobType {
@@ -54,7 +71,8 @@ pub struct Job {
     pub equivalent_jobs: Vec<Job>,
     // client can be a window client, worker client so `Client` will be an enum in future
     pub client: JS<Client>,
-    pub referrer: ServoUrl
+    pub referrer: ServoUrl,
+    pub force_bypass_cache: bool
 }
 
 impl Job {
@@ -72,7 +90,8 @@ impl Job {
             promise: promise,
             equivalent_jobs: vec![],
             client: JS::from_ref(client),
-            referrer: client.creation_url()
+            referrer: client.creation_url(),
+            force_bypass_cache: false
         }
     }
     #[allow(unrooted_must_root)]
@@ -264,10 +283,10 @@ impl JobQueue {
         };
         // Step 1
         if reg.get_uninstalling() {
-            let err_type = Error::Type("Update called on an uninstalling registration".to_owned());
-            let settle_type = SettleType::Reject(err_type);
-            let async_job_handler = AsyncJobHandler::new(job.scope_url.clone(), InvokeType::Settle(settle_type));
-            return script_thread.queue_serviceworker_job(box async_job_handler, global);
+            return reject_promise_job("Update called on an uninstalling registration",
+                                      script_thread,
+                                      global,
+                                      &job.scope_url);
         }
         let newest_worker = match reg.get_newest_worker() {
             Some(worker) => worker,
@@ -276,17 +295,236 @@ impl JobQueue {
         // Step 2
         if (&*newest_worker).get_script_url() == job.script_url  && job.job_type == JobType::Update {
             // Step 4
-            let err_type = Error::Type("Invalid script ServoURL".to_owned());
-            let settle_type = SettleType::Reject(err_type);
-            let async_job_handler = AsyncJobHandler::new(job.scope_url.clone(), InvokeType::Settle(settle_type));
-            script_thread.queue_serviceworker_job(box async_job_handler, global);
+            reject_promise_job("Invalid script ServoURL", script_thread, global, &job.scope_url);
         } else {
-            job.client.set_controller(&*newest_worker);
+            // Step 5
+            let mut https_state: Option<HttpsState> = None;
+            let mut referrer_policy = String::new();
+            let pipeline = global.pipeline_id();
+            // We fetch a classic worker script by default as we dont support modules now.
+            let mut req = Request::get_classic_fetch_req(job.script_url.clone(), pipeline);
+            // https://html.spec.whatwg.org/multipage/webappapis.html#fetching-scripts-perform-fetch
+            // `is top level` flag is true for all classic script fetches
+            perform_fetch_hook_and_fetch(req,
+                                         true,
+                                         reg.should_use_cache(),
+                                         job.force_bypass_cache,
+                                         &*reg,
+                                         global, 
+                                         &job.scope_url);
+            println!("Else part running");
+
+            // Ok so perform_fetch_hook_and_fetch after retrieving the script can then call
+            // job queue to perform
+
+            /*job.client.set_controller(&*newest_worker);
             let settle_type = SettleType::Resolve(Trusted::new(&*reg));
             let async_job_handler = AsyncJobHandler::new(job.scope_url.clone(), InvokeType::Settle(settle_type));
-            script_thread.queue_serviceworker_job(box async_job_handler, global);
+            script_thread.queue_serviceworker_job(box async_job_handler, global);*/
         }
-        let finish_job_handler = box FinishJobHandler::new(job.scope_url.clone(), Trusted::new(global));
-        script_thread.queue_finish_job(finish_job_handler, global);
+        /*let finish_job_handler = box FinishJobHandler::new(job.scope_url.clone(), Trusted::new(global));*/
+        /*script_thread.queue_finish_job(finish_job_handler, global);*/
     }
+}
+
+
+fn reject_promise_job(reason: &str,
+                      script_thread: &ScriptThread,
+                      global: &GlobalScope,
+                      for_scope: &ServoUrl) {
+    let err_type = Error::Type(reason.to_owned());
+    let settle_type = SettleType::Reject(err_type);
+    let async_job_handler = AsyncJobHandler::new(for_scope.clone(), InvokeType::Settle(settle_type));
+    script_thread.queue_serviceworker_job(box async_job_handler, global);
+} 
+
+// Step 7 (perform the fetch hook)
+pub fn perform_fetch_hook_and_fetch(req:Request,
+                                    is_top_level: bool,
+                                    use_cache: bool,
+                                    force_bypass_cache: bool,
+                                    reg: &ServiceWorkerRegistration, 
+                                    global: &GlobalScope,
+                                    reg_scope: &ServoUrl) {
+    println!("Perform fetch async called");
+    // Step 1
+    if !use_cache || force_bypass_cache || (reg.update_time_check().is_some() && reg.update_time_check().unwrap()) {
+        req.cache_mode.set(CacheMode::NoCache);
+    } else {
+        // Step 2
+        req.skip_service_worker.set(true);
+        // Step 3
+        if !is_top_level {
+            fetch_async(req, global, reg_scope);
+            return;
+        }
+        // Step 4 
+        req.headers_mut().set_raw("ServiceWorker", vec!["script".bytes().collect()]);
+        // Step 5
+        req.redirect_mode.set(RedirectMode::Error);
+    }
+    // Step 6
+    fetch_async(req, global, reg_scope);
+}
+
+
+// Represents the eventual completion of a service worker script resource update
+struct SWScriptFetchHandler {
+    /// The response body received to date.
+    data: Vec<u8>,
+    /// The response metadata received to date.
+    metadata: Option<Metadata>,
+    /// The initial URL requested (The script url).
+    url: ServoUrl,
+    /// Indicates whether the request failed, and why.
+    status: Result<(), NetworkError>,
+    /// global object used to queue reject/resolve promise.
+    global: Trusted<GlobalScope>,
+    /// The scope of the registration from which this resource update was requested.
+    reg_scope: ServoUrl
+}
+
+impl PreInvoke for SWScriptFetchHandler {}
+
+impl FetchResponseListener for SWScriptFetchHandler {
+    fn process_request_body(&mut self) {
+        // TODO
+    }
+
+    fn process_request_eof(&mut self) {
+        // TODO
+    }
+
+    #[allow(unrooted_must_root)]
+    fn process_response(&mut self, fetch_metadata: Result<FetchMetadata, NetworkError>) {
+        // we need script thread handle here
+        println!("Async SW response runing here");
+        // use global script chan to queue resolve/reject promise job
+        let global = &*self.global.root();
+        self.metadata = fetch_metadata.ok().map(|meta| match meta {
+            FetchMetadata::Unfiltered(m) => m,
+            FetchMetadata::Filtered { unsafe_, .. } => unsafe_
+        });
+
+        let mut content_type = self.metadata.as_ref().and_then(|m| {
+            m.headers.as_ref().and_then(|headers| headers.get::<ContentType>())
+        });
+        // okay here we have extracted the mime 
+        // Step 7 (Async part)
+        let &ContentType(ref extracted_mime) = content_type.take().unwrap();
+        println!("{:?}", extracted_mime);
+        match *extracted_mime {
+            Mime(TopLevel::Application , SubLevel::Javascript, _) |
+            Mime(TopLevel::Text, SubLevel::Javascript, _) => {}
+            _ => {
+                let err_type = Error::Type("Security Error".to_owned());
+                let settle_type = SettleType::Reject(err_type);
+                let async_job_handler = AsyncJobHandler::new(self.url.clone(), InvokeType::Settle(settle_type));
+                let dom_task = CommonScriptMsg::RunnableMsg(ScriptThreadEventCategory::ServiceWorkerEvent, box async_job_handler);
+                let _ = global.script_chan().send(dom_task);
+                // set our fetch context status 
+                self.status = Err(NetworkError::Internal("Security Error".to_owned()));
+                return;
+            }
+        }
+
+        // Existence of this field allows to override the controlling scope in registration object
+        let serviceworker_allowed = self.metadata.as_ref().map(|m|{
+            m.headers.as_ref().and_then(|headers| headers.get_raw("Service-Worker-Allowed"))
+        });
+
+        // Step 9
+        let https_state = self.metadata.as_ref().map(|m| m.https_state);
+
+        // Step 10 TODO get referrer policy
+
+        // Step 11 TODO check sw allowed scope failure
+
+        // Step 12
+        let ref scope_url = self.reg_scope;
+        let mut max_scope_str = "";
+
+        // modifiy the controlled scope accordingly if sw allowed header is sent with repsonse
+        // TODO convert serviceworker_allowed to a &str, it is &[Vec<u8>]
+        let serviceworker_allowed = serviceworker_allowed.unwrap().unwrap().to_vec()[0].clone();
+        let serviceworker_allowed = String::from_utf8(serviceworker_allowed);
+        let max_scope_string = ServoUrl::from_url(Url::parse("https://github.com/creativcoder/rust.json").unwrap());
+        /*let max_scope_string = match serviceworker_allowed {
+            None => {
+                let mut url = self.url.clone();
+                url.into_url().unwrap().path_segments_mut().unwrap().pop();
+                url
+                // Step 14
+            }
+            Some(scope) => {
+                // Step 15
+                let mut script_url = self.url.clone();
+                self.url.join(scope).unwrap()
+            }
+        };*/
+
+        // Step 18
+        if !(max_scope_string.path() == self.reg_scope.path()) {
+            let err_type = Error::Type("Security Error".to_owned());
+            let settle_type = SettleType::Reject(err_type);
+            let async_job_handler = AsyncJobHandler::new(self.url.clone(), InvokeType::Settle(settle_type));
+            let dom_task = CommonScriptMsg::RunnableMsg(ScriptThreadEventCategory::ServiceWorkerEvent, box async_job_handler);
+            let _ = global.script_chan().send(dom_task);
+            self.status = Err(NetworkError::Internal("Security Error".to_owned()));
+            return;
+        }
+
+        // Step 19 TODO(creativcoder) once https://github.com/whatwg/fetch/issues/376 is resolved
+        
+        // Step 20
+        // return true;
+
+        // this methods completion value is the script resource that will get stored in ServiceWorker object
+        // TODO
+
+    }
+
+    fn process_response_chunk(&mut self, mut chunk: Vec<u8>) {
+        // self.data will be our updated service worker script resource
+        self.data.append(&mut chunk);
+    }
+
+    fn process_response_eof(&mut self, _response: Result<(), NetworkError>) {
+        /*let response = self.response_object.root();
+        let global = response.global();
+        let cx = global.get_cx();
+        let _ac = JSAutoCompartment::new(cx, global.reflector().get_jsobject().get());
+        response.finish(mem::replace(&mut self.body, vec![]));
+        // TODO
+        // ... trailerObject is not supported in Servo yet.*/
+    }
+}
+
+#[allow(unrooted_must_root)]
+fn fetch_async(req: Request ,global: &GlobalScope, reg_scope: &ServoUrl) {
+    println!("fetch async called core resource thread creating");
+    // used to send the fetch message
+    let core_resource_thread = global.core_resource_thread();
+    // let response = Response::new(global);
+    let (action_sender, action_receiver) = ipc::channel().unwrap();
+    let sw_script_fetch = Arc::new(Mutex::new(SWScriptFetchHandler {
+        data: vec![],
+        url: req.url(),
+        metadata: None,
+        status: Ok(()),
+        global: Trusted::new(global),
+        reg_scope: reg_scope.clone()
+    }));
+
+    let listener = NetworkListener {
+        context: sw_script_fetch,
+        task_source: global.networking_task_source(),
+        wrapper: Some(global.get_runnable_wrapper())
+    };
+    // Use the action receiver and route it to the listener we created above
+    // Here message is of type FetchResponseMsg
+    ROUTER.add_route(action_receiver.to_opaque(), box move |message| {
+        listener.notify_fetch(message.to().unwrap());
+    });
+    let _ = core_resource_thread.send(WorkerScriptFetchMsg(request_init_from_request(req), action_sender));
 }

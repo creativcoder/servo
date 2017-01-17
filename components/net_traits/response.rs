@@ -12,6 +12,7 @@ use servo_url::ServoUrl;
 use std::ascii::AsciiExt;
 use std::cell::{Cell, RefCell};
 use std::sync::{Arc, Mutex};
+use hyper::header::ReferrerPolicy;
 
 /// [Response type](https://fetch.spec.whatwg.org/#concept-response-type)
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize, HeapSizeOf)]
@@ -243,6 +244,11 @@ impl Response {
         }
 
         response
+    }
+
+    // https://w3c.github.io/webappsec-referrer-policy/#parse-referrer-policy-from-header
+    pub fn get_referrer_policy(&self) -> Option<&ReferrerPolicy> {
+        self.headers.get::<ReferrerPolicy>()
     }
 
     pub fn metadata(&self) -> Result<FetchMetadata, NetworkError> {
